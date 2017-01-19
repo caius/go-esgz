@@ -60,17 +60,23 @@ func upsertWorker(documents <-chan LogDocument, completed chan bool) {
 	for doc := range documents {
 		docs = append(docs, doc)
 
-		if len(docs) >= 2 {
+		if len(docs) >= BatchSize {
 			upsertToES(docs)
 			docs = []LogDocument{} // reset array
 		}
+	}
+
+	// Handle any remaining documents as well
+	if len(docs) > 0 {
+		upsertToES(docs)
 	}
 
 	completed <- true
 }
 
 func upsertToES(documents []LogDocument) {
-	for doc := range documents {
+	fmt.Printf("worker got %d documents\n", len(documents))
+	for _, doc := range documents {
 		fmt.Printf("%s\n%s\n\n", doc.Header, doc.Body)
 	}
 }
