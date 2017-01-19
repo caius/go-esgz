@@ -5,6 +5,9 @@ import "encoding/json"
 import "fmt"
 import "strings"
 
+const BatchSize int = 4
+const WorkerCount int = 1
+
 // Represents a bulk header & document to be inserted into ES
 type LogDocument struct {
 	Header string
@@ -84,10 +87,6 @@ func main() {
 {"@uuid":"9E25C76C-B0A5-4061-A7B2-842A6C3DD94A","@type":"nginx"}
 {"@uuid":"308DEF68-EB81-4392-A545-C0D494B4FB85","@type":"nginx"}
 `
-
-	// How many workers we want
-	const worker_count = 2
-
 	// Setup our channels for dishing out/waiting on work
 	lines := make(chan string)
 	documents := make(chan LogDocument, 3)
@@ -95,7 +94,7 @@ func main() {
 	upsertDone := make(chan bool)
 
 	// Kick off our worker routines
-	for i := 0; i < worker_count; i++ {
+	for i := 0; i < WorkerCount; i++ {
 		go lineWorker(lines, documents, lineDone)
 		go upsertWorker(documents, upsertDone)
 	}
@@ -109,13 +108,13 @@ func main() {
 	close(lines)
 
 	// Once the line workers are finished, close off documents channel
-	for i := 0; i < worker_count; i++ {
+	for i := 0; i < WorkerCount; i++ {
 		<-lineDone
 	}
 	close(documents)
 
 	// Wait for upsert workers to do their thing
-	for i := 0; i < worker_count; i++ {
+	for i := 0; i < WorkerCount; i++ {
 		<-upsertDone
 	}
 
