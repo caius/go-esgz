@@ -1,11 +1,13 @@
 package main
 
 import "bufio"
+import "bytes"
 import "encoding/json"
 import "fmt"
+import "net/http"
 import "strings"
 
-const BatchSize int = 4
+const BatchSize int = 7
 const WorkerCount int = 1
 
 // Represents a bulk header & document to be inserted into ES
@@ -27,6 +29,17 @@ type LogHeader struct {
 	Id        string `json:"_id"`
 	Type      string `json:"_type"`
 	Timestamp string `json:"_timestamp"`
+}
+
+func (doc *LogDocument) String() string {
+	var buf bytes.Buffer
+
+	buf.WriteString(doc.Header)
+	buf.WriteString("\n")
+	buf.WriteString(doc.Body)
+	buf.WriteString("\n")
+
+	return buf.String()
 }
 
 // Takes in log lines from a channel, parses the required info out & creates
@@ -75,10 +88,21 @@ func upsertWorker(documents <-chan LogDocument, completed chan bool) {
 }
 
 func upsertToES(documents []LogDocument) {
-	fmt.Printf("worker got %d documents\n", len(documents))
+	fmt.Printf("Upserting %d documents\n", len(documents))
+
+	body := new(bytes.Buffer)
 	for _, doc := range documents {
-		fmt.Printf("%s\n%s\n\n", doc.Header, doc.Body)
+		_, err := body.WriteString(doc.String())
+		if err != nil {
+			panic(err)
+		}
 	}
+
+	resp, err := http.Post("http://localhost:8080/", "application/json", body)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(resp)
 }
 
 func main() {
@@ -95,7 +119,8 @@ func main() {
 `
 	// Setup our channels for dishing out/waiting on work
 	lines := make(chan string)
-	documents := make(chan LogDocument, 3)
+	documents := make(chan LogDocument)
+
 	lineDone := make(chan bool)
 	upsertDone := make(chan bool)
 
