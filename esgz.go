@@ -5,10 +5,14 @@ import "bytes"
 import "encoding/json"
 import "fmt"
 import "net/http"
-import "strings"
+import "os"
+import "runtime"
+import "time"
 
-const BatchSize int = 7
-const WorkerCount int = 1
+const BatchSize int = 2
+const WorkerCount int = 2
+
+var ESUrl string
 
 // Represents a bulk header & document to be inserted into ES
 type LogDocument struct {
@@ -44,7 +48,7 @@ func (doc *LogDocument) String() string {
 
 // Takes in log lines from a channel, parses the required info out & creates
 // LogDocument instances for the upsertWorkers to insert into ES
-func lineWorker(lines <-chan string, documents chan LogDocument, completed chan bool) {
+func lineWorker(lines <-chan string, documents chan LogDocument, done chan bool) {
 	for line := range lines {
 		// Unpack the line for the bits we need to build the header
 		lineInfo := LineInfo{}
@@ -64,10 +68,10 @@ func lineWorker(lines <-chan string, documents chan LogDocument, completed chan 
 		documents <- document
 	}
 
-	completed <- true
+	done <- true
 }
 
-func upsertWorker(documents <-chan LogDocument, completed chan bool) {
+func upsertWorker(documents <-chan LogDocument, docCounter chan int, done chan bool) {
 	docs := []LogDocument{}
 
 	for doc := range documents {
@@ -75,6 +79,7 @@ func upsertWorker(documents <-chan LogDocument, completed chan bool) {
 
 		if len(docs) >= BatchSize {
 			upsertToES(docs)
+			docCounter <- len(docs)
 			docs = []LogDocument{} // reset array
 		}
 	}
@@ -84,55 +89,96 @@ func upsertWorker(documents <-chan LogDocument, completed chan bool) {
 		upsertToES(docs)
 	}
 
-	completed <- true
+	// docCounter <- len(docs)
+	done <- true
 }
 
 func upsertToES(documents []LogDocument) {
-	fmt.Printf("Upserting %d documents\n", len(documents))
-
 	body := new(bytes.Buffer)
 	for _, doc := range documents {
 		_, err := body.WriteString(doc.String())
 		if err != nil {
+			fmt.Println("Error upserting to ES")
 			panic(err)
 		}
 	}
 
-	resp, err := http.Post("http://localhost:8080/", "application/json", body)
+	resp, err := http.Post(ESUrl, "application/json", body)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(resp)
+
+	defer resp.Body.Close()
+	// fmt.Println(resp)
+}
+
+func outputStats(docCounter <-chan int, done chan bool) {
+	totalCount := 0
+	currentCount := 0
+
+	startTime := time.Now()
+	ticker := time.NewTicker(time.Second)
+
+	for {
+		select {
+		case i := <-docCounter:
+			totalCount += i
+			currentCount += i
+
+		case <-ticker.C:
+			c := currentCount
+			currentCount = 0
+			fmt.Printf("%d/s uploaded\n", c)
+
+		case <-done:
+			ticker.Stop()
+
+			// Little summary to finish
+			duration := time.Since(startTime).Seconds()
+			fmt.Printf("Upserted %d documents in %.2f seconds at %.0f/s\n", totalCount, duration, float64(totalCount)/duration)
+
+			return
+		}
+	}
 }
 
 func main() {
-	// An artificial input source.  Normally this is a file passed on the command line.
-	const input = `{"@uuid":"B92C2B19-900B-4385-9A04-CB97D4E7B05A","@type":"nginx"}
-{"@uuid":"0F642EC2-2734-4E1B-A7A9-85F3D3AB01F8","@type":"nginx"}
-{"@uuid":"6B090E82-29FA-4068-A377-B8E335A02391","@type":"app"}
-{"@uuid":"CE8DEC80-4121-44C5-8887-49EF183558C2","@type":"app"}
-{"@uuid":"62094485-69A6-4D1B-A05A-60989C9CC0A8","@type":"syslog"}
-{"@uuid":"C27F4411-0548-4996-9065-17C1EB8250EC","@type":"syslog"}
-{"@uuid":"55F2182C-4EB2-4A82-99B0-3092FBCDE750","@type":"app"}
-{"@uuid":"9E25C76C-B0A5-4061-A7B2-842A6C3DD94A","@type":"nginx"}
-{"@uuid":"308DEF68-EB81-4392-A545-C0D494B4FB85","@type":"nginx"}
-`
+	runtime.GOMAXPROCS(runtime.NumCPU() + 1)
+
+	// TODO: handle cli arguments better
+	argv := os.Args[1:]
+	indexName := argv[0]
+
+	ESUrl = fmt.Sprintf("http://localhost:8080/%s/_bulk", indexName)
+	fmt.Println(ESUrl)
+
+	// TODO: make this a proper ARGF
+	argf, err := os.Open("/dev/stdin")
+	if err != nil {
+		fmt.Println("Error reading stdin")
+		panic(err)
+	}
+
 	// Setup our channels for dishing out/waiting on work
 	lines := make(chan string)
-	documents := make(chan LogDocument)
+	documents := make(chan LogDocument, 3)
+	docCounter := make(chan int)
 
+	statsDone := make(chan bool)
 	lineDone := make(chan bool)
 	upsertDone := make(chan bool)
+
+	// Stats outputter
+	go outputStats(docCounter, statsDone)
 
 	// Kick off our worker routines
 	for i := 0; i < WorkerCount; i++ {
 		go lineWorker(lines, documents, lineDone)
-		go upsertWorker(documents, upsertDone)
+		go upsertWorker(documents, docCounter, upsertDone)
 	}
 
 	// Read the input & buffer into LogDocuments for workers
-	file := strings.NewReader(input)
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(argf)
 	for scanner.Scan() {
 		lines <- scanner.Text()
 	}
@@ -149,4 +195,6 @@ func main() {
 		<-upsertDone
 	}
 
+	close(docCounter)
+	statsDone <- true
 }
