@@ -2,6 +2,7 @@ package main
 
 import "bufio"
 import "bytes"
+import "io/ioutil"
 import "encoding/json"
 import "fmt"
 import "net/http"
@@ -12,7 +13,10 @@ import "time"
 const BatchSize int = 2
 const WorkerCount int = 2
 
-var ESUrl string
+// const ESUrl string = "http://localhost:8080/_bulk"
+const ESUrl string = "http://localhost:9200/_bulk"
+
+var ESIndex string
 
 // Represents a bulk header & document to be inserted into ES
 type LogDocument struct {
@@ -22,9 +26,9 @@ type LogDocument struct {
 
 // Used to parse the LogDocument Body to build the header for it
 type LineInfo struct {
-	UUID string `json:"id"` // `json:"@uuid"` // _id: json['@uuid'],
-	// Type      string `json:"@type"` // _type: json['@type'],
-	// Timestamp string `json:"@timestamp"` // _timestamp: json['@timestamp']
+	UUID      string `json:"@uuid"`
+	Type      string `json:"@type"`
+	Timestamp string `json:"@timestamp"`
 }
 
 // Used to create the header JSON string for LogDocument
@@ -33,6 +37,10 @@ type LogHeader struct {
 	Id        string `json:"_id"`
 	Type      string `json:"_type"`
 	Timestamp string `json:"_timestamp"`
+}
+
+type IndexHeader struct {
+	Index LogHeader `json:"index"`
 }
 
 func (doc *LogDocument) String() string {
@@ -60,8 +68,13 @@ func lineWorker(lines <-chan string, documents chan LogDocument, done chan bool)
 		}
 
 		// Build a header now we have the info
-		logHeader := LogHeader{Id: lineInfo.UUID}
-		header, _ := json.Marshal(logHeader)
+		logHeader := LogHeader{
+			Index:     ESIndex,
+			Id:        lineInfo.UUID,
+			Type:      lineInfo.Type,
+			Timestamp: lineInfo.Timestamp,
+		}
+		header, _ := json.Marshal(IndexHeader{logHeader})
 
 		// Create a LogDocument and queue it up
 		document := LogDocument{Header: string(header), Body: line}
@@ -108,8 +121,12 @@ func upsertToES(documents []LogDocument) {
 		panic(err)
 	}
 
+	if resp.Status != "200" {
+		b, _ := ioutil.ReadAll(resp.Body)
+		fmt.Println(string(b))
+	}
+
 	defer resp.Body.Close()
-	// fmt.Println(resp)
 }
 
 func outputStats(docCounter <-chan int, done chan bool) {
@@ -147,10 +164,7 @@ func main() {
 
 	// TODO: handle cli arguments better
 	argv := os.Args[1:]
-	indexName := argv[0]
-
-	ESUrl = fmt.Sprintf("http://localhost:8080/%s/_bulk", indexName)
-	fmt.Println(ESUrl)
+	ESIndex = argv[0]
 
 	// TODO: make this a proper ARGF
 	argf, err := os.Open("/dev/stdin")
